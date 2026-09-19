@@ -1,0 +1,35 @@
+services:
+  worker:
+    build:
+      context: ./worker
+      target: cpu
+    environment:
+      DEVICE: cpu
+      TRANSCRIPTION_ENGINE: ${TRANSCRIPTION_ENGINE:-basic-pitch}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-80}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-1}
+      JOB_TTL_HOURS: ${JOB_TTL_HOURS:-24}
+      DEMUCS_MODEL: ${DEMUCS_MODEL:-htdemucs}
+      MUSCRIPTOR_MODEL: ${MUSCRIPTOR_MODEL:-large}
+      HF_HOME: /data/models/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+    volumes:
+      - scoreforge-data:/data
+      - scoreforge-model-cache:/home/appuser/.cache
+    expose:
+      - "8000"
+
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - worker
+
+volumes:
+  scoreforge-data:
+  scoreforge-model-cache:

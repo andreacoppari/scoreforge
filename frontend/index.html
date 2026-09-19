@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Private, local AI music transcription and voice separation." />
+    <title>ScoreForge — Audio to sheet music</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="ScoreForge home">
+        <span class="brand-mark" aria-hidden="true">𝄞</span><span>scoreforge</span>
+      </a>
+      <div class="system-status" id="system-status"><span></span> Checking worker</div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow">LOCAL AI MUSIC TOOLS</p>
+        <h1>Hear it.<br /><em>Put it on paper.</em></h1>
+        <p class="hero-copy">Turn a recording into editable MIDI and MusicXML, or split the vocal from the music. Your audio stays on your own worker.</p>
+      </section>
+
+      <section class="workspace" aria-label="Audio processing workspace">
+        <div class="mode-switch" role="tablist" aria-label="Choose a workflow">
+          <button class="mode active" id="transcribe-tab" role="tab" aria-selected="true" data-mode="transcribe">
+            <span class="mode-icon">♫</span><span><strong>Transcribe</strong><small>Audio → score</small></span>
+          </button>
+          <button class="mode" id="separate-tab" role="tab" aria-selected="false" data-mode="separate">
+            <span class="mode-icon">◌</span><span><strong>Voice / music</strong><small>Split a vocal stem</small></span>
+          </button>
+        </div>
+
+        <form id="job-form" novalidate>
+          <label class="dropzone" id="dropzone" for="audio-file">
+            <input id="audio-file" name="file" type="file" accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/flac,audio/ogg,audio/aac,.mp3,.wav,.m4a,.flac,.ogg,.aac" />
+            <span class="upload-orb" aria-hidden="true">↑</span>
+            <span class="drop-title" id="drop-title">Drop an audio file here</span>
+            <span class="drop-detail" id="drop-detail">MP3, WAV, M4A, FLAC, OGG or AAC · up to 80 MB</span>
+            <span class="browse">Browse files</span>
+          </label>
+
+          <div class="file-card" id="file-card" hidden>
+            <span class="audio-file-icon">♪</span>
+            <span class="file-name" id="file-name"></span>
+            <span class="file-meta" id="file-meta"></span>
+            <button type="button" id="remove-file" aria-label="Remove selected file">×</button>
+          </div>
+
+          <div class="transcription-options" id="transcription-options">
+            <div class="option-heading">
+              <div><p class="label">TRANSCRIPTION STYLE</p><h2>What should the score mean?</h2></div>
+            </div>
+            <div class="transcription-mode-grid">
+              <label class="transcription-mode-card selected"><input type="radio" name="transcription-mode" value="melody" checked /><strong>Melody</strong><span>One playable note at a time, adapted for the instrument you select.</span></label>
+              <label class="transcription-mode-card"><input type="radio" name="transcription-mode" value="single_part" /><strong>Single part</strong><span>Find one original instrument part, retaining only playable chords.</span></label>
+            </div>
+            <div class="option-heading instrument-heading">
+              <div><p class="label">TARGET INSTRUMENTS</p><h2>Where should the notes go?</h2></div>
+              <button class="text-button" id="all-instruments" type="button">Select all</button>
+            </div>
+            <p class="helper" id="instrument-helper">Choose one or more instruments. The same detected melody can be adapted for flute, violin, or guitar, with octave changes when needed.</p>
+            <p class="notation-helper">Balanced notation cleanup is applied to every export: eighth-note quantization, micro-note removal, and playable durations.</p>
+            <div class="instrument-grid" id="instrument-grid">
+              <label><input type="checkbox" name="instrument" value="piano" checked /><span class="instrument piano">♩</span><span>Piano</span></label>
+              <label><input type="checkbox" name="instrument" value="guitar" checked /><span class="instrument guitar">⌁</span><span>Guitar</span></label>
+              <label><input type="checkbox" name="instrument" value="trumpet" checked /><span class="instrument trumpet">♬</span><span>Trumpet</span></label>
+              <label><input type="checkbox" name="instrument" value="violin" checked /><span class="instrument violin">𝄞</span><span>Violin</span></label>
+              <label><input type="checkbox" name="instrument" value="flute" checked /><span class="instrument flute">♮</span><span>Flute</span></label>
+            </div>
+            <div class="engine-note"><span>⌘</span><p><strong id="engine-name">Basic Pitch baseline</strong><br /><span id="engine-copy">Fast, free polyphonic note detection. Instrument-agnostic.</span></p></div>
+          </div>
+
+          <div class="separation-note" id="separation-note" hidden><span>◌</span><p><strong>Vocal & instrumental stems</strong><br />Demucs creates a vocal stem and a music-only stem. It does not isolate individual orchestral instruments.</p></div>
+
+          <div class="submit-row">
+            <p id="form-error" class="form-error" role="alert"></p>
+            <button class="primary" id="submit" type="submit"><span id="submit-text">Create sheet music</span><span aria-hidden="true">→</span></button>
+          </div>
+        </form>
+      </section>
+
+      <section class="result-panel" id="result-panel" hidden aria-live="polite">
+        <div class="result-top"><div><p class="label">PROCESSING</p><h2 id="job-message">Preparing your job…</h2></div><span class="percent" id="job-percent">0%</span></div>
+        <div class="progress-track"><span id="progress-bar"></span></div>
+        <p class="result-copy" id="result-copy">The local worker is analyzing your audio. Keep this page open; you can download when it finishes.</p>
+        <div class="downloads" id="downloads"></div>
+        <button class="new-job" id="new-job" type="button" hidden>Process another file</button>
+      </section>
+    </main>
+
+    <footer><span>ScoreForge runs on your hardware.</span><span>No subscriptions. No uploaded library.</span></footer>
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

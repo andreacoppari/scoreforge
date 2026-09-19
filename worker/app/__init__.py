@@ -1,0 +1,1 @@
+"""ScoreForge local inference worker."""
