@@ -13,13 +13,14 @@
   function updateFile(file) {
     if (!file) { $("file-card").hidden = true; dropzone.hidden = false; return; }
     $("file-name").textContent = file.name;
-    $("file-meta").textContent = `${formatSize(file.size)} · ready to process`;
+    $("file-meta").textContent = `${formatSize(file.size)} · ${mode === "pdf" ? "ready to convert" : "ready to process"}`;
     $("file-card").hidden = false;
     dropzone.hidden = true;
   }
 
   function setMode(nextMode) {
     mode = nextMode;
+    const isPdf = mode === "pdf";
     document.querySelectorAll(".mode").forEach((button) => {
       const active = button.dataset.mode === mode;
       button.classList.toggle("active", active);
@@ -27,7 +28,15 @@
     });
     $("transcription-options").hidden = mode !== "transcribe";
     $("separation-note").hidden = mode !== "separate";
-    $("submit-text").textContent = mode === "transcribe" ? "Create sheet music" : "Separate voice & music";
+    $("pdf-note").hidden = !isPdf;
+    fileInput.accept = isPdf
+      ? ".musicxml,.xml,.mid,.midi,application/vnd.recordare.musicxml+xml,application/xml,audio/midi,audio/x-midi"
+      : "audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/flac,audio/ogg,audio/aac,.mp3,.wav,.m4a,.flac,.ogg,.aac";
+    $("drop-title").textContent = isPdf ? "Drop a MusicXML or MIDI file here" : "Drop an audio file here";
+    $("drop-detail").textContent = isPdf ? "MusicXML, XML, MIDI or MID · up to 80 MB" : "MP3, WAV, M4A, FLAC, OGG or AAC · up to 80 MB";
+    $("submit-text").textContent = mode === "transcribe" ? "Create sheet music" : isPdf ? "Open printable PDF" : "Separate voice & music";
+    fileInput.value = "";
+    updateFile();
   }
 
   document.querySelectorAll(".mode").forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
@@ -91,15 +100,6 @@
         link.href = endpoint(`/api/jobs/${job.id}/downloads/${encodeURIComponent(artifact.name)}`);
         link.innerHTML = `<span>${artifact.label}<small>${artifact.format}</small></span><span>↓</span>`;
         card.append(link);
-        if (artifact.format === "MusicXML") {
-          const print = document.createElement("a");
-          print.className = "print-score";
-          print.href = endpoint(`/api/jobs/${job.id}/print/${encodeURIComponent(artifact.name)}`);
-          print.target = "_blank";
-          print.rel = "noopener";
-          print.textContent = "Open printable PDF ↗";
-          card.append(print);
-        }
         return card;
       }));
       $("new-job").hidden = false;
@@ -118,6 +118,37 @@
     }
   }
 
+  async function convertScoreToPdf(file) {
+    const preview = window.open("", "scoreforge-pdf");
+    if (preview) preview.document.write("<title>ScoreForge PDF</title><p>Creating your printable PDF…</p>");
+    const data = new FormData();
+    data.append("file", file);
+    const response = await fetch(endpoint("/api/convert/pdf"), { method: "POST", body: data });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      if (preview) preview.close();
+      throw new Error(error.detail || "The worker could not convert this score.");
+    }
+    const pdf = await response.blob();
+    const pdfUrl = URL.createObjectURL(pdf);
+    if (preview) preview.location.replace(pdfUrl);
+    $("result-panel").hidden = false;
+    $("job-message").textContent = "Printable PDF ready";
+    $("job-percent").textContent = "100%";
+    $("progress-bar").style.width = "100%";
+    $("result-copy").textContent = preview
+      ? "Your PDF opened in a separate tab. Use that tab’s print button or Ctrl+P / Cmd+P."
+      : "Your browser blocked the new tab. Use the PDF link below.";
+    const link = document.createElement("a");
+    link.className = "download";
+    link.href = pdfUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.innerHTML = "<span>Printable score<small>PDF</small></span><span>↗</span>";
+    $("downloads").replaceChildren(link);
+    $("new-job").hidden = false;
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearTimeout(pollTimer);
@@ -132,15 +163,27 @@
     }
     const data = new FormData();
     data.append("file", file);
-    if (mode === "transcribe") {
-      instruments.forEach((instrument) => data.append("instruments", instrument.value));
-      data.append("transcription_mode", document.querySelector('input[name="transcription-mode"]:checked').value);
-    }
     const submit = $("submit");
     submit.disabled = true;
     $("result-panel").hidden = false;
     $("downloads").replaceChildren();
     $("new-job").hidden = true;
+    if (mode === "pdf") {
+      $("job-message").textContent = "Engraving your score…";
+      $("job-percent").textContent = "…";
+      $("progress-bar").style.width = "45%";
+      $("result-copy").textContent = "MuseScore is creating a local PDF.";
+      try {
+        await convertScoreToPdf(file);
+      } catch (error) {
+        showStatus({ status: "failed", progress: 100, message: "Could not create PDF", error: error.message });
+      } finally { submit.disabled = false; }
+      return;
+    }
+    if (mode === "transcribe") {
+      instruments.forEach((instrument) => data.append("instruments", instrument.value));
+      data.append("transcription_mode", document.querySelector('input[name="transcription-mode"]:checked').value);
+    }
     showStatus({ status: "queued", progress: 2, message: "Uploading securely to your worker…" });
     try {
       const response = await fetch(endpoint(`/api/jobs/${mode === "transcribe" ? "transcribe" : "separate"}`), { method: "POST", body: data });
@@ -160,11 +203,11 @@
       const status = $("system-status");
       status.className = "system-status online";
       status.innerHTML = `<span></span> Worker online · ${health.device}`;
-      if (health.engine === "muscriptor") {
-        $("engine-name").textContent = health.capabilities?.muscriptor ? "MuScriptor" : "MuScriptor unavailable";
+      if (health.engine === "hybrid") {
+        $("engine-name").textContent = health.capabilities?.muscriptor ? "Fast Melody + MuScriptor parts" : "Basic Pitch Melody";
         $("engine-copy").textContent = health.capabilities?.muscriptor
-          ? "CPU model with hard constraints for the selected instrument groups."
-          : "Rebuild the worker and configure HF_TOKEN for the gated MuScriptor model.";
+          ? "Melody uses fast Basic Pitch. Single part uses CPU MuScriptor with instrument constraints."
+          : "Melody is available. Rebuild the worker and configure HF_TOKEN for Single part.";
       }
     })
     .catch(() => { const status = $("system-status"); status.className = "system-status offline"; status.innerHTML = "<span></span> Worker unavailable"; });

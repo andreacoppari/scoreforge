@@ -41,6 +41,13 @@ def _safe_extension(filename: str | None) -> str:
     return suffix
 
 
+def _safe_score_extension(filename: str | None) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in SCORE_EXTENSIONS:
+        raise HTTPException(415, "Use a MusicXML (.musicxml/.xml) or MIDI (.mid/.midi) score.")
+    return suffix
+
+
 async def _save_upload(upload: UploadFile, job_dir: Path) -> Path:
     suffix = _safe_extension(upload.filename)
     target = job_dir / f"input{suffix}"
@@ -57,6 +64,25 @@ async def _save_upload(upload: UploadFile, job_dir: Path) -> Path:
     if not total:
         target.unlink(missing_ok=True)
         raise HTTPException(400, "The uploaded audio file is empty.")
+    return target
+
+
+async def _save_score_upload(upload: UploadFile, work_dir: Path) -> Path:
+    suffix = _safe_score_extension(upload.filename)
+    target = work_dir / f"source{suffix}"
+    total = 0
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    with target.open("wb") as handle:
+        while chunk := await upload.read(1024 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                handle.close()
+                target.unlink(missing_ok=True)
+                raise HTTPException(413, f"Upload limit is {settings.max_upload_mb} MB.")
+            handle.write(chunk)
+    if not total:
+        target.unlink(missing_ok=True)
+        raise HTTPException(400, "The score file is empty.")
     return target
 
 
@@ -117,24 +143,12 @@ def _musescore_binary() -> str | None:
     return shutil.which("mscore") or shutil.which("musescore3")
 
 
-def _export_printable_pdf(job_id: str, source_name: str) -> Path:
-    """Engrave a completed score locally and reuse its cached PDF thereafter."""
-    if job_id not in job_dirs or not re.fullmatch(r"[A-Za-z0-9_.-]+", source_name):
-        raise HTTPException(404, "Score not found.")
-
-    source = job_dirs[job_id] / "output" / source_name
-    if source.suffix.lower() not in SCORE_EXTENSIONS or not source.is_file():
-        raise HTTPException(404, "Score not found.")
-
-    pdf_path = source.with_suffix(".pdf")
-    if pdf_path.is_file() and pdf_path.stat().st_size > 0:
-        return pdf_path
-
+def _render_score_pdf(source: Path, pdf_path: Path, config_dir: Path) -> None:
+    """Engrave an uploaded MIDI or MusicXML score locally with MuseScore."""
     binary = _musescore_binary()
     if not binary:
         raise HTTPException(503, "PDF rendering is unavailable. Rebuild the worker with MuseScore.")
 
-    config_dir = job_dirs[job_id] / ".musescore"
     config_dir.mkdir(exist_ok=True)
     environment = os.environ | {
         "QT_QPA_PLATFORM": "offscreen",
@@ -157,14 +171,13 @@ def _export_printable_pdf(job_id: str, source_name: str) -> Path:
         pdf_path.unlink(missing_ok=True)
         detail = (result.stdout or "MuseScore could not engrave this score.").strip()
         raise HTTPException(500, f"PDF rendering failed: {detail[-600:]}")
-    return pdf_path
 
 
 @app.get("/health")
 async def health() -> dict:
     return {
         "status": "ok",
-        "engine": settings.transcription_engine,
+        "engine": "hybrid",
         "device": settings.device,
         "capabilities": {
             "basic_pitch": True,
@@ -183,8 +196,8 @@ async def create_transcription(
     engine: str | None = Form(default=None),
     transcription_mode: str = Form(default="melody"),
 ) -> JobResponse:
-    selected_engine = (engine or settings.transcription_engine).lower()
-    if selected_engine not in {"basic-pitch", "muscriptor"}:
+    requested_engine = engine.lower() if engine else None
+    if requested_engine and requested_engine not in {"basic-pitch", "muscriptor"}:
         raise HTTPException(400, "Engine must be basic-pitch or muscriptor.")
     # Accept names used by an older browser build while keeping the public
     # vocabulary aligned with the two distinct score meanings.
@@ -195,6 +208,13 @@ async def create_transcription(
         raise HTTPException(400, "Transcription mode must be melody or single_part.")
     if transcription_mode == "single_part" and len(instruments) != 1:
         raise HTTPException(400, "Single part mode requires exactly one instrument.")
+    # The workflows have distinct capability requirements. Basic Pitch is much
+    # faster for an arranged melody; MuScriptor is the only local engine here
+    # that can make an instrument-aware original-part hypothesis.
+    selected_engine = "basic-pitch" if transcription_mode == "melody" else "muscriptor"
+    if requested_engine and requested_engine != selected_engine:
+        required = "Basic Pitch" if selected_engine == "basic-pitch" else "MuScriptor"
+        raise HTTPException(400, f"{transcription_mode} requires {required}.")
     job_id = uuid.uuid4().hex
     job_dir = settings.jobs_dir / job_id
     job_dir.mkdir(parents=True)
@@ -236,6 +256,31 @@ async def create_separation(background_tasks: BackgroundTasks, file: UploadFile 
     return job
 
 
+@app.post("/api/convert/pdf")
+async def convert_score_to_pdf(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> FileResponse:
+    work_dir = settings.jobs_dir / "conversions" / uuid.uuid4().hex
+    work_dir.mkdir(parents=True)
+    try:
+        source = await _save_score_upload(file, work_dir)
+        pdf_path = work_dir / "scoreforge-score.pdf"
+        async with semaphore:
+            await asyncio.to_thread(_render_score_pdf, source, pdf_path, work_dir / ".musescore")
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+    background_tasks.add_task(shutil.rmtree, work_dir, ignore_errors=True)
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename="scoreforge-score.pdf",
+        headers={"Content-Disposition": 'inline; filename="scoreforge-score.pdf"'},
+        background=background_tasks,
+    )
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str) -> JobResponse:
     if job_id not in jobs:
@@ -251,17 +296,3 @@ async def download(job_id: str, name: str, request: Request) -> FileResponse:
     if not path.is_file():
         raise HTTPException(404, "Artifact not found.")
     return FileResponse(path, filename=name, headers={"Cache-Control": "private, max-age=3600"})
-
-
-@app.get("/api/jobs/{job_id}/print/{source_name}")
-async def printable_pdf(job_id: str, source_name: str) -> FileResponse:
-    pdf_path = await asyncio.to_thread(_export_printable_pdf, job_id, source_name)
-    return FileResponse(
-        pdf_path,
-        media_type="application/pdf",
-        filename=pdf_path.name,
-        headers={
-            "Cache-Control": "private, max-age=3600",
-            "Content-Disposition": f'inline; filename="{pdf_path.name}"',
-        },
-    )

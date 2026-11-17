@@ -4,6 +4,7 @@ ScoreForge is a self-hosted web app that turns audio into editable music notatio
 
 - **Transcribe** converts an MP3, WAV, M4A, FLAC, or OGG file into per-instrument MIDI files and a standard MusicXML score.
 - **Voice / music split** creates separate vocal and instrumental WAV files.
+- **Score to PDF** turns an existing MusicXML or MIDI file into a printable PDF locally.
 
 It is designed so that the browser UI can be deployed free on Cloudflare Pages, while the model worker runs on hardware you control. Audio is never sent to a paid API.
 
@@ -11,14 +12,14 @@ It is designed so that the browser UI can be deployed free on Cloudflare Pages, 
 
 Audio-to-MIDI is the right first step, but it is not a guarantee of publish-ready engraving. Mixed commercial recordings are the difficult case: overlapping instruments, reverb, drums, and vocals can create missed or extra notes. The app therefore exports MIDI **and** MusicXML so the result can be refined in MuseScore, Dorico, or another notation editor.
 
-The default `basic-pitch` engine is a fast, free, polyphonic transcription baseline, but it is deliberately **instrument agnostic**. It can create Melody arrangements, but cannot truthfully identify a piano, trumpet, violin, or other recorded source part in a dense mix. The optional CPU MuScriptor engine constrains decoding to piano, guitar, trumpet, violin, and flute groups for the Single part workflow. MuScriptor Large can run on CPU but is slow and memory-intensive; start with `small` or `medium` unless you have ample RAM and patience.
+ScoreForge selects its local engine by workflow: **Melody** uses the fast, free Basic Pitch baseline, while **Single part** uses CPU MuScriptor because it is the instrument-aware option. Basic Pitch is deliberately instrument agnostic and cannot truthfully identify a piano, trumpet, violin, or other recorded source part in a dense mix. MuScriptor constrains decoding to piano, guitar, trumpet, violin, and flute groups. The worker keeps the MuScriptor model in memory after its first use, avoiding a reload on subsequent Single part jobs. MuScriptor Large can run on CPU but is slow and memory-intensive; start with `small` unless you have ample RAM and patience.
 
 ## Two transcription modes
 
-- **Melody** is the default. The app transcribes the complete recording, derives its prominent upper melodic line, then writes a strictly one-note-at-a-time MIDI/MusicXML arrangement for every selected target instrument. This is the choice for “give me this melody for violin, flute, and guitar.” It does not claim that the original audio contained those instruments. Octaves are moved where necessary to remain in the target instrument's practical range.
+- **Melody** is the default. The app transcribes the complete recording, derives a prominent one-note-at-a-time line from detected note attacks, then writes a playable MIDI/MusicXML arrangement for every selected target instrument. This is the choice for “give me this melody for violin, flute, and guitar.” It does not claim that the original audio contained those instruments. Octaves are moved where necessary to remain in the target instrument's practical range.
 - **Single part** asks MuScriptor to restrict decoding to exactly one selected instrument family and exports a simplified score for that recorded part. This is the choice for “find the violin actually present in this recording.” It produces notation, not an isolated audio stem; use Voice / music split for the separate vocal/instrumental audio workflow. Basic Pitch cannot run this mode because it is instrument agnostic.
 
-Every exported score receives the same **balanced cleanup** before it becomes MusicXML: timing is snapped to an eighth-note grid, only notes shorter than one fifth of a grid are removed, and repeated pitches are joined. Melody arrangements are strictly monophonic. Single parts are constrained to playable chord limits: flute/trumpet 1, violin 2, guitar 6, piano 10. This makes the results more playable, at the cost of not preserving every expressive micro-detail in the recording.
+Every exported score receives the same **balanced cleanup** before it becomes MusicXML: timing is snapped to an eighth-note grid and only notes shorter than one fifth of a grid are removed. Melody arrangements preserve repeated-pitch attacks and stay strictly monophonic. Single parts join close repeated pitches and are constrained to playable chord limits: flute/trumpet 1, violin 2, guitar 6, piano 10. This makes the results more playable, at the cost of not preserving every expressive micro-detail in the recording.
 
 Source separation is a different task. Demucs reliably offers **vocals / instrumental** separation, which is why that workflow is separate. It does not promise isolated piano, guitar, trumpet, violin, or flute stems.
 
@@ -90,7 +91,7 @@ Do not expose an unauthenticated public worker for arbitrary uploads. Put Cloudf
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DEVICE` | `cpu` | Fixed to CPU in the provided Docker configuration. |
-| `TRANSCRIPTION_ENGINE` | `basic-pitch` | `basic-pitch` or optional CPU `muscriptor`. |
+| `TRANSCRIPTION_ENGINE` | `basic-pitch` | Legacy API default; browser workflows choose Basic Pitch for Melody and MuScriptor for Single part. |
 | `MAX_UPLOAD_MB` | `80` | Per-upload limit. |
 | `JOB_TTL_HOURS` | `24` | Completed-file retention period. |
 | `ALLOWED_ORIGINS` | `http://localhost:8080` | Comma-separated browser origins permitted to use the API. |
@@ -107,15 +108,15 @@ Hardware guidance:
 ## API
 
 - `GET /health` reports the selected engine and installed capabilities.
-- `POST /api/jobs/transcribe` accepts `multipart/form-data`: `file`, `instruments` (repeatable for `melody`, exactly one for `single_part`), `engine`, and `transcription_mode` (`melody` or `single_part`). The legacy values `arrange` and `detect` are accepted for compatibility.
+- `POST /api/jobs/transcribe` accepts `multipart/form-data`: `file`, `instruments` (repeatable for `melody`, exactly one for `single_part`), and `transcription_mode` (`melody` or `single_part`). The worker uses Basic Pitch for Melody and MuScriptor for Single part; the legacy values `arrange` and `detect` are accepted for compatibility.
 - `POST /api/jobs/separate` accepts `file` and separates vocals from accompaniment.
 - `GET /api/jobs/{id}` returns status and output links.
 - `GET /api/jobs/{id}/downloads/{name}` downloads an artifact.
-- `GET /api/jobs/{id}/print/{name}` engraves a completed MIDI or MusicXML artifact to a cached, browser-printable PDF. The interface exposes this for MusicXML because it is the more faithful notation source.
+- `POST /api/convert/pdf` accepts a standalone MusicXML (`.musicxml`/`.xml`) or MIDI (`.mid`/`.midi`) upload and responds with a browser-printable PDF.
 
 ## Printing a score
 
-Each MusicXML result includes an **Open printable PDF** link. It opens a separate browser tab while the local worker engraves and caches the PDF with MuseScore. Use the browser PDF viewer's print button (or `Ctrl+P` / `Cmd+P`) for paper output. This requires no cloud service and no GPU, but increases the worker image size because MuseScore is bundled for reliable notation layout.
+Choose the **Score to PDF** tab, upload an existing MusicXML or MIDI file, and click **Open printable PDF**. The worker engraves it locally with MuseScore and opens the PDF in a separate tab. Use the browser PDF viewer's print button (or `Ctrl+P` / `Cmd+P`) for paper output. This requires no cloud service and no GPU, but increases the worker image size because MuseScore is bundled for reliable notation layout.
 
 The worker permits a single active job by default. This protects modest home hardware and avoids multiple large models exhausting memory. Set `MAX_CONCURRENT_JOBS` deliberately only after measuring your system.
 

@@ -3,7 +3,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pretty_midi
 from music21 import converter
 
@@ -48,6 +47,9 @@ POLYPHONY_LIMITS = {
 # enough rhythmic character to make the exported score useful for rehearsal.
 SIMPLIFICATION_SUBDIVISIONS_PER_BEAT = 2
 MIN_NOTE_DURATION_GRID_FRACTION = 0.20
+# Notes starting within this small window belong to the same chord/attack. The
+# lead extractor chooses one of them but lets later attacks interrupt a held note.
+MELODY_ATTACK_WINDOW_SECONDS = 0.05
 
 
 def _polyphony_limit(instrument: Instrument) -> int:
@@ -108,18 +110,25 @@ def _simplify_midi(
             end = max(start + grid, round(note.end / grid) * grid)
             quantized.append(pretty_midi.Note(note.velocity, note.pitch, start, end))
 
-        # Merge repeats of one pitch separated only by a quantization-sized gap.
-        by_pitch: dict[int, list[pretty_midi.Note]] = {}
-        for note in quantized:
-            by_pitch.setdefault(note.pitch, []).append(note)
-        merged: list[pretty_midi.Note] = []
-        for notes in by_pitch.values():
-            for note in notes:
-                if merged and merged[-1].pitch == note.pitch and note.start <= merged[-1].end + grid * 0.5:
-                    merged[-1].end = max(merged[-1].end, note.end)
-                else:
-                    merged.append(note)
-        track.notes = sorted(merged, key=lambda item: (item.start, item.pitch, item.end))
+        if monophonic:
+            # Repeated notes are meaningful in a melody: they represent a new
+            # attack even if the pitch is identical. Do not turn them into one
+            # long sustain during notation cleanup.
+            track.notes = quantized
+        else:
+            # For a detected source part, merge repeats of one pitch separated
+            # only by a quantization-sized gap to reduce visual noise.
+            by_pitch: dict[int, list[pretty_midi.Note]] = {}
+            for note in quantized:
+                by_pitch.setdefault(note.pitch, []).append(note)
+            merged: list[pretty_midi.Note] = []
+            for notes in by_pitch.values():
+                for note in notes:
+                    if merged and merged[-1].pitch == note.pitch and note.start <= merged[-1].end + grid * 0.5:
+                        merged[-1].end = max(merged[-1].end, note.end)
+                    else:
+                        merged.append(note)
+            track.notes = sorted(merged, key=lambda item: (item.start, item.pitch, item.end))
 
         if monophonic:
             notes = track.notes
@@ -172,32 +181,40 @@ def _lead_notes(source: Path) -> list[pretty_midi.Note]:
     still review the exported notation for musical editorial decisions.
     """
     score = pretty_midi.PrettyMIDI(str(source))
-    lead_source = pretty_midi.PrettyMIDI(initial_tempo=120)
-    lead_source.instruments = [track for track in score.instruments if not track.is_drum]
-    roll = lead_source.get_piano_roll(fs=50)
-    if roll.size == 0 or not np.any(roll):
+    candidates = sorted(
+        (
+            pretty_midi.Note(note.velocity, note.pitch, note.start, note.end)
+            for track in score.instruments
+            if not track.is_drum
+            for note in track.notes
+            if note.end - note.start >= 0.03
+        ),
+        key=lambda note: (note.start, note.pitch, note.end),
+    )
+    if not candidates:
         raise RuntimeError("No pitched notes were found from which to create a melody.")
-    pitches = np.full(roll.shape[1], -1, dtype=int)
-    active = np.any(roll > 0, axis=0)
-    pitches[active] = np.max(np.where(roll[:, active] > 0, np.arange(128)[:, None], -1), axis=0)
+
+    # Choose one note from each onset group. Unlike a piano-roll maximum, this
+    # reacts to new attacks below a previously sustained high note, preserving
+    # the melody's rhythm rather than holding an upper pitch indefinitely.
+    selected: list[pretty_midi.Note] = []
+    index = 0
+    while index < len(candidates):
+        attack = candidates[index].start
+        group: list[pretty_midi.Note] = []
+        while index < len(candidates) and candidates[index].start <= attack + MELODY_ATTACK_WINDOW_SECONDS:
+            group.append(candidates[index])
+            index += 1
+        selected.append(
+            max(group, key=lambda note: (note.velocity, note.pitch, note.end - note.start))
+        )
+
     notes: list[pretty_midi.Note] = []
-    start = 0
-    current = int(pitches[0])
-    for frame in range(1, len(pitches) + 1):
-        next_pitch = int(pitches[frame]) if frame < len(pitches) else -2
-        if next_pitch == current:
-            continue
-        if current >= 0 and (frame - start) >= 2:
-            notes.append(
-                pretty_midi.Note(
-                    velocity=96,
-                    pitch=current,
-                    start=start / 50,
-                    end=frame / 50,
-                )
-            )
-        start = frame
-        current = next_pitch
+    for index, note in enumerate(selected):
+        next_start = selected[index + 1].start if index + 1 < len(selected) else note.end
+        end = min(note.end, next_start)
+        if end > note.start:
+            notes.append(pretty_midi.Note(note.velocity, note.pitch, note.start, end))
     if not notes:
         raise RuntimeError("The detected melody was too short to export.")
     return notes

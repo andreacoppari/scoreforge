@@ -22,7 +22,7 @@
       <section class="hero">
         <p class="eyebrow">LOCAL AI MUSIC TOOLS</p>
         <h1>Hear it.<br /><em>Put it on paper.</em></h1>
-        <p class="hero-copy">Turn a recording into editable MIDI and MusicXML, or split the vocal from the music. Your audio stays on your own worker.</p>
+        <p class="hero-copy">Turn a recording into editable MIDI and MusicXML, split the vocal from the music, or make a printable PDF from an existing score. Your files stay on your own worker.</p>
       </section>
 
       <section class="workspace" aria-label="Audio processing workspace">
@@ -32,6 +32,9 @@
           </button>
           <button class="mode" id="separate-tab" role="tab" aria-selected="false" data-mode="separate">
             <span class="mode-icon">◌</span><span><strong>Voice / music</strong><small>Split a vocal stem</small></span>
+          </button>
+          <button class="mode" id="pdf-tab" role="tab" aria-selected="false" data-mode="pdf">
+            <span class="mode-icon">▤</span><span><strong>Score to PDF</strong><small>MIDI / MusicXML</small></span>
           </button>
         </div>
 
@@ -76,6 +79,7 @@
           </div>
 
           <div class="separation-note" id="separation-note" hidden><span>◌</span><p><strong>Vocal & instrumental stems</strong><br />Demucs creates a vocal stem and a music-only stem. It does not isolate individual orchestral instruments.</p></div>
+          <div class="separation-note" id="pdf-note" hidden><span>▤</span><p><strong>Make a printable score</strong><br />Upload an existing MusicXML or MIDI file. ScoreForge engraves it locally and opens the PDF in a separate tab.</p></div>
 
           <div class="submit-row">
             <p id="form-error" class="form-error" role="alert"></p>
