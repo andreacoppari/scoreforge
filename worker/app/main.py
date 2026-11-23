@@ -103,16 +103,25 @@ async def _run(
             if job.kind == "transcribe":
                 job.progress = 35
                 job.message = "Detecting notes…"
-                artifacts = await asyncio.to_thread(
-                    transcribe,
-                    audio_path,
-                    output_dir,
-                    instruments,
-                    engine,
-                    settings.muscriptor_model,
-                    settings.device,
-                    transcription_mode,
-                )
+                for attempt in range(2):
+                    try:
+                        artifacts = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                transcribe,
+                                audio_path,
+                                output_dir,
+                                instruments,
+                                engine,
+                                settings.muscriptor_model,
+                                settings.device,
+                                transcription_mode,
+                            ),
+                            timeout=60,
+                        )
+                        break
+                    except TimeoutError:
+                        if attempt == 1:
+                            raise
             else:
                 job.progress = 30
                 job.message = "Separating vocals from music…"
